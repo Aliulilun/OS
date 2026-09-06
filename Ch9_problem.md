@@ -78,12 +78,10 @@ Counting 表示法:
 ## 一句話總結
 
 Grouping 是「把很多個 free block 的位址集中打包存放」，不管它們是否連續；Counting 則是進一步利用「free block 通常連續出現」的特性，只需記錄「起始位址 + 連續多少個」，用更精簡的方式表達同樣的資訊。
-
 兩者都比最陽春的 linked list（一個 node 對一個 block）更省空間、更有效率，只是 Counting 更依賴、也更充分利用了磁碟空間釋放時「常常整串連續」的實務特性，因此在真實系統中通常比 Grouping 更省儲存開銷。
 
+# Contiguous Allocation 的兩個問題與對應解法
 ## 1. Compaction 為什麼耗時？—— 磁碟實體操作的本質
-
-你的理解完全正確。原因可以拆成兩層：
 
 ### (1) 對象是「實體磁碟資料」，不是記憶體
 Compaction 要做的事是：把磁碟上所有檔案實際搬動位置，讓所有 file 緊密排列在一起，藉此把散落各處的小塊外部碎片（external fragmentation）合併成一塊完整的連續空間。
