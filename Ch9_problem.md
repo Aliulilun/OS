@@ -143,7 +143,126 @@ Contiguous allocation 要求一個檔案從頭到尾，必須佔用一整段連�
 Extent-based allocation 的做法，是把「整個檔案必須連續」的硬性要求，放寬成「檔案由數個各自連續的區段 (extent) 組成」。當檔案需要擴充、原地長不下去時，系統就再配置一個新的連續 extent 接到檔案後面，而不需要事先預留大片空間或整份搬遷——這樣既保留了 contiguous allocation「大範圍連續讀取」的效能優勢，又解決了檔案難以擴充、容易產生外部碎片的缺點，可以說是 contiguous 和 linked allocation 之間的一種折衷設計。
 """
 
-file_path = "contiguous_allocation_analysis.md"
-with open(file_path, "w", encoding="utf-8") as f:
-    f.write(markdown_content)
-print(f"File successfully created: {file_path}")
+# Linked Allocation：用 Cluster 解決 Pointer Overhead 的具體做法
+
+## 先回顧問題本身
+
+Linked allocation 的做法是：檔案的每一個 block，都存一個 pointer 指向下一個 block。
+
+$$\text{Block 1 } [\text{資料} \mid \text{pointer} \to \text{Block 5}]$$
+$$\text{Block 5 } [\text{資料} \mid \text{pointer} \to \text{Block 9}]$$
+$$\text{Block 9 } [\text{資料} \mid \text{pointer} \to \text{Block 20}]$$
+$$\text{Block 20 } [\text{資料} \mid \text{pointer} \to \text{NULL}]$$
+
+問題來了：每一個 block 都要撥出一部分空間存 pointer，這造成兩個麻煩：
+
+* **浪費空間**：假設一個 block 是 $512\text{ bytes}$，pointer 要占 $4\text{ bytes}$，等於每個 block 真正能放資料的空間只剩 $508\text{ bytes}$——看似不多，但整個磁碟成千上萬個 block 累積下來，浪費相當可觀。
+* **浪費比例（overhead ratio）** = $\frac{\text{pointer 大小}}{\text{block 大小}}$，block 越小，這個比例就越高，越不划算。
+
+---
+
+## Cluster 的核心概念
+
+* **做法**：不再以「單一 block」作為分配單位，而是把好幾個 block 綁成一組，稱為一個 **cluster**，然後 pointer 是指向「下一個 cluster」，而不是「下一個 block」。
+
+### 具體例子
+假設原本 $1\text{ block} = 512\text{ bytes}$，現在改成 $4\text{ blocks}$ 綁成 $1\text{ cluster}$（$\text{cluster size} = 2\text{KB}$）：
+
+* **沒有 cluster（以 block 為單位）**：
+  $$[\text{Block1}\mid\text{ptr}] \to [\text{Block2}\mid\text{ptr}] \to [\text{Block3}\mid\text{ptr}] \to [\text{Block4}\mid\text{ptr}] \to \dots$$
+  $$\uparrow \text{每一個 block 都要放一個 pointer}$$
+
+* **有 cluster（以 cluster 為單位，1 cluster = 4 blocks）**：
+  $$[\text{Block1 Block2 Block3 Block4} \mid \text{ptr}] \to [\text{Block5 Block6 Block7 Block8} \mid \text{ptr}] \to \dots$$
+  $$\uparrow \text{只有「整組 4 個 block」的最後才需要放一個 pointer}$$
+
+### 對照差異
+
+| 比較項目 | 沒有 Cluster (純 block-based) | 有 Cluster (4 blocks 一組) |
+| :--- | :--- | :--- |
+| **需要幾個 pointer** | 每 $1$ 個 block 就要 $1$ 個 pointer | 每 $4$ 個 block 才需要 $1$ 個 pointer |
+| **Pointer 總數（假設檔案佔 100 blocks）** | $100$ 個 pointer | $25$ 個 pointer（減少到 $\frac{1}{4}$） |
+| **Overhead 比例** | $\frac{\text{pointer 大小}}{512\text{ bytes}}$ | $\frac{\text{pointer 大小}}{512 \times 4\text{ bytes}}$，分母變大 $4$ 倍，比例大幅下降 |
+
+### 為什麼這樣能省空間？
+因為 pointer 這項「固定開銷」攤提到更大的分配單位上：
+
+$$\text{Overhead 比例} = \frac{\text{pointer 大小}}{\text{分配單位大小}}$$
+
+* 分母（分配單位）從「$1$ 個 block」放大成「$n$ 個 block（一個 cluster）」
+* pointer 的數量就從「每個 block 一個」降低成「每個 cluster 一個」
+* 整體而言，用來存 pointer 的空間占比就變小了
+
+---
+
+## 這個做法的代價（trade-off）
+
+跟你之前問的「row-major/column-major 造成 page fault 差異」邏輯很像——改善一個問題，往往會帶來另一個副作用，這裡的副作用是：
+
+* **增加了 Internal Fragmentation（內部碎片）**
+  * 因為現在配置空間的最小單位變成「一整個 cluster」，即使檔案只需要用到 cluster 裡的一部分空間，系統還是得整個 cluster 都配置給它，剩下沒用到的空間就浪費掉了。
+  * **舉例**：如果 $\text{cluster} = 4\text{ blocks}$，而某個檔案的最後一段資料只需要 $1\text{ block}$ 的量，系統仍然要撥出整個 $4\text{-block}$ 的 cluster，其中 $3$ 個 block 的空間就被浪費（internal fragmentation）。
+
+### 一句話總結
+Cluster 的做法是把多個 block 打包成一個更大的分配單位，讓 pointer 只需要記錄在「每個 cluster 的最後一個 block」，而不是「每個 block」，藉此把 pointer 造成的空間開銷攤薄、大幅減少 pointer 總數；代價是分配單位變大後，容易產生 internal fragmentation（尤其在檔案大小不是 cluster 大小整數倍時，最後一個 cluster 常常沒被用滿）。
+
+---
+
+## 對照表：本質上跟你之前學過的觀念相通
+
+| 概念 | 相通之處 |
+| :--- | :--- |
+| **Extent-based allocation** | 都是把「多個 block」打包成一個更大單位來管理，減少個別記錄的開銷 |
+| **Paging 的 internal fragmentation** | 都是「配置單位變大 $\to$ 節省管理開銷，但增加浪費空間」的經典 trade-off |
+
+---
+
+## Cluster 內部的 Block 需要連續嗎？
+
+**要！** Cluster 內部的 blocks 必須是實體連續的，這是 cluster 之所以能運作的關鍵前提。
+
+### 為什麼一定要連續？
+回想一下 cluster 解決的問題：把多個 block 綁成一組，讓 pointer 只需要放在「整組的最後」，而不是每個 block 都要放。
+這個設計能成立，是因為：
+* 如果 cluster 裡面的 block 是連續的，那麼只要知道 cluster 的起始位址，接下來的第 2、3、4 個 block 位置就能直接用「起始位址 + offset」算出來，根本不需要 pointer 去指引。
+* 反過來說，如果 cluster 裡面的 block 不連續、要靠 pointer 一個個串起來，那就完全失去了「省 pointer」這個目的——因為那樣的話，每個 block 之間還是得個別存 pointer，跟原本沒用 cluster 是一樣的，等於白做工。
+
+### 圖解對照
+
+* **✅ 正確的 Cluster 結構（內部連續）**
+  ```text
+  Cluster A（4 個實體連續的 block：位址 100, 101, 102, 103）
+  ┌─────┬─────┬─────┬─────┐
+  │ 100 │ 101 │ 102 │ 103 │ ← 只有最後一個 block(103) 存 pointer
+  └─────┴─────┴─────┴─────┘
+                            │
+                            ↓ pointer 指向下一個 cluster
+  Cluster B（位址 500, 501, 502, 503）
+  ┌─────┬─────┬─────┬─────┐
+  │ 500 │ 501 │ 502 │ 503 │
+  └─────┴─────┴─────┴─────┘
+  ```
+  拿到 cluster A 的起始位址 $100$，OS 就知道 $101$、$102$、$103$ 一定緊接在後面——這是靠位置的連續性去推算，不是靠 pointer。
+
+* **❌ 如果 cluster 內部不連續（會是這樣，但這樣就沒意義了）**
+  ```text
+  Block 7  [ptr → 22]
+  Block 22 [ptr → 5]
+  Block 5  [ptr → 91]
+  Block 91 [ptr → 下一個 cluster]
+  ```
+  這樣的話，每個 block 還是得各自存 pointer，跟「沒有 cluster」的原始 linked allocation 完全一樣，根本沒有省到任何空間。
+
+---
+
+## Cluster 內、外的連結方式，是兩種完全不同的機制
+
+| 層級 | 連結方式 | 原因 |
+| :--- | :--- | :--- |
+| **Cluster 內部（block 與 block 之間）** | 實體連續（位址上緊鄰） | 不需要 pointer，靠位址直接推算，這才是省空間的關鍵 |
+| **Cluster 與 Cluster 之間** | Pointer 相連（linked list） | Cluster 之間不需要連續，磁碟上可以散落各處，這保留了 linked allocation 最大的優點——不要求整個檔案連續存放，因此不會有像 contiguous allocation 那樣嚴重的外部碎片問題 |
+
+### 一句話總結
+Cluster 內部的 block 必須是實體連續的（如同一個小型的 extent），這樣才能省去 block 與 block 之間的 pointer；而 cluster 與 cluster 之間，則維持 linked allocation 原本的精神，用 pointer 串接，彼此不需要相鄰，可以分散在磁碟各處。
+
+這正好呼應了你前面問的 extent-based allocation——某種程度上，cluster 可以理解成「linked allocation 裡面，塞進了一小段 extent 的概念」，用局部的連續性去換取效率，但整體檔案依然保有 linked allocation「不需要整份連續」的彈性。
