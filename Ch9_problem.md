@@ -66,3 +66,87 @@ file_path = "contiguous_allocation_analysis.md"
 with open(file_path, "w", encoding="utf-8") as f:
     f.write(markdown_content)
 print(f"File successfully created: {file_path}")
+
+# Free Space Management：Grouping vs Counting
+
+這兩種方法都是想解決同一個問題：用 linked list 記錄 free blocks 時，如果一個一個 block 串起來效率太差（要走訪很多個 node 才能找到足夠空間，而且每個 node 只記錄「一個」free block，浪費空間）。Grouping 和 Counting 都是想辦法讓 linked list 更精簡、更有效率，但採用的角度不同。
+
+---
+
+## 先回顧最原始的做法：Linked List (單純版)
+
+$$	ext{Free Block List: } [	ext{Block 5}] 	o [	ext{Block 6}] 	o [	ext{Block 9}] 	o [	ext{Block 10}] 	o [	ext{Block 11}] 	o \dots$$
+
+每個 node 只代表一個 free block，要串很多很多個 node，非常沒效率——尤其當 free space 是連續一大片時特別浪費。
+
+---
+
+## 1. Grouping（分組法）
+
+### 核心概念
+把連續的 $n$ 個 free block 位址，記錄在「第一個 free block」裡面。
+
+### 具體做法
+* 第一個 free block 裡面，存放接下來 $n$ 個 free block 的位址（例如 $n = 100$）。
+* 這 $n$ 個位址中的最後一個，不是真正的 free block，而是指向下一組的「第一個 free block」。
+* 如此層層串接下去。
+
+### 圖解
+```text
+Block A（第一個 free block，內容存 100 個位址）：
+  [位址1, 位址2, 位址3, ..., 位址99, → 指向 Block B]
+
+Block B（下一組的第一個 free block）：
+  [位址1, 位址2, ..., 位址99, → 指向 Block C]
+```
+
+### 特點
+* 可以快速找到一大批 free block 的位址（一次拿到 $99$ 個位址）。
+* **不要求這些 block 一定要連續**——這點是 Grouping 的重要特性：即使 free block 分散在磁碟各處，也能有效率地把它們的位址「打包」記錄在一起。
+
+---
+
+## 2. Counting（計數法）
+
+### 核心概念
+利用「空間常常是連續釋放/配置」這個特性，只記錄：
+1. 第一個 free block 的位址。
+2. 從這裡開始，連續有幾個 block 是 free 的（count）。
+
+### 圖解
+```text
+一般 Linked List:
+[Block 5] → [Block 6] → [Block 7] → [Block 8] → [Block 20] → [Block 21] → ...
+（要存 6 筆 node）
+
+Counting 表示法:
+(起始位址 = 5, count = 4)   ← 代表 block 5, 6, 7, 8 都是 free
+(起始位址 = 20, count = 2)  ← 代表 block 20, 21 都是 free
+（只要存 2 筆 record！）
+```
+
+### 特點
+* **前提假設**：磁碟空間經常是「一大段連續」被釋放或配置（例如刪除一個大檔案，會一次釋放一整串連續的 block）。
+* 因此不需要把每個 block 都個別記錄，只要記「起點 + 長度」就好。
+* 比 Grouping 更省空間，前提是 free space 真的常常成串連續出現。
+
+---
+
+## 兩者關鍵差異對照表
+
+| 比較項目 | Grouping (分組法) | Counting (計數法) |
+| :--- | :--- | :--- |
+| **記錄方式** | 把 $n$ 個 free block 的個別位址，存在第一個 block 裡面 | 只記「起始位址 + 連續長度」這一組數字 |
+| **是否要求連續** | ❌ 不要求，這些 free block 可以分散各處 | ✅ 要求（或說：善加利用）block 是連續的 free space |
+| **儲存效率** | 中等——仍然要存很多個「位址」 | 較高——用一組 $(	ext{起始}, 	ext{count})$ 就能代表一大段連續空間，資料量更小 |
+| **適用情境** | free space 分散、不連續時仍然有效 | free space 常常成片連續釋放/配置時效率最好（貼近實際磁碟使用行為） |
+| **設計哲學** | 用「打包」的方式，一次記錄多個位址，減少 node 數量 | 用「壓縮」的方式，善用連續性，把多個 block 濃縮成一筆 $(	ext{start}, 	ext{length})$ |
+
+---
+
+## 一句話總結
+
+Grouping 是「把很多個 free block 的位址集中打包存放」，不管它們是否連續；Counting 則是進一步利用「free block 通常連續出現」的特性，只需記錄「起始位址 + 連續多少個」，用更精簡的方式表達同樣的資訊。
+
+兩者都比最陽春的 linked list（一個 node 對一個 block）更省空間、更有效率，只是 Counting 更依賴、也更充分利用了磁碟空間釋放時「常常整串連續」的實務特性，因此在真實系統中通常比 Grouping 更省儲存開銷。
+
