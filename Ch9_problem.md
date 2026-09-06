@@ -1,5 +1,3 @@
-markdown_content = """# Contiguous Allocation 的兩個問題與對應解法
-
 ## 1. Compaction 為什麼耗時？—— 磁碟實體操作的本質
 
 你的理解完全正確。原因可以拆成兩層：
